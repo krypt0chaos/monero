@@ -1423,7 +1423,6 @@ bool simple_wallet::set_ring(const std::vector<std::string> &args)
           }
           ring.push_back(offset);
           ptr += read;
-          MGINFO("read offset: " << offset);
         }
         if (!valid)
           continue;
@@ -2092,6 +2091,19 @@ bool simple_wallet::set_segregation_height(const std::vector<std::string> &args/
   return true;
 }
 
+bool simple_wallet::set_ignore_fractional_outputs(const std::vector<std::string> &args/* = std::vector<std::string>()*/)
+{
+  const auto pwd_container = get_and_verify_password();
+  if (pwd_container)
+  {
+    parse_bool_and_use(args[1], [&](bool r) {
+      m_wallet->ignore_fractional_outputs(r);
+      m_wallet->rewrite(m_wallet_file, pwd_container->password());
+    });
+  }
+  return true;
+}
+
 bool simple_wallet::help(const std::vector<std::string> &args/* = std::vector<std::string>()*/)
 {
   if(args.empty())
@@ -2479,6 +2491,7 @@ bool simple_wallet::set_variable(const std::vector<std::string> &args)
     const std::pair<size_t, size_t> lookahead = m_wallet->get_subaddress_lookahead();
     success_msg_writer() << "subaddress-lookahead = " << lookahead.first << ":" << lookahead.second;
     success_msg_writer() << "segregation-height = " << m_wallet->segregation_height();
+    success_msg_writer() << "ignore-fractional-outputs = " << m_wallet->ignore_fractional_outputs();
     return true;
   }
   else
@@ -2533,6 +2546,7 @@ bool simple_wallet::set_variable(const std::vector<std::string> &args)
     CHECK_SIMPLE_VARIABLE("key-reuse-mitigation2", set_key_reuse_mitigation2, tr("0 or 1"));
     CHECK_SIMPLE_VARIABLE("subaddress-lookahead", set_subaddress_lookahead, tr("<major>:<minor>"));
     CHECK_SIMPLE_VARIABLE("segregation-height", set_segregation_height, tr("unsigned integer"));
+    CHECK_SIMPLE_VARIABLE("ignore-fractional-outputs", set_ignore_fractional_outputs, tr("0 or 1"));
   }
   fail_msg_writer() << tr("set: unrecognized argument(s)");
   return true;
@@ -3234,6 +3248,7 @@ bool simple_wallet::init(const boost::program_options::variables_map& vm)
   {
     try
     {
+      m_trusted_daemon = false;
       if (tools::is_local_address(m_wallet->get_daemon_address()))
       {
         MINFO(tr("Daemon is local, assuming trusted"));
@@ -4277,12 +4292,7 @@ uint64_t simple_wallet::get_daemon_blockchain_height(std::string& err)
   {
     throw std::runtime_error("simple_wallet null wallet");
   }
-
-  COMMAND_RPC_GET_HEIGHT::request req;
-  COMMAND_RPC_GET_HEIGHT::response res = boost::value_initialized<COMMAND_RPC_GET_HEIGHT::response>();
-  bool r = m_wallet->invoke_http_json("/getheight", req, res);
-  err = interpret_rpc_response(r, res.status);
-  return res.height;
+  return m_wallet->get_daemon_blockchain_height(err);
 }
 //----------------------------------------------------------------------------------------------------
 bool simple_wallet::show_blockchain_height(const std::vector<std::string>& args)
@@ -4969,10 +4979,14 @@ bool simple_wallet::sweep_unmixable(const std::vector<std::string> &args_)
 //----------------------------------------------------------------------------------------------------
 bool simple_wallet::sweep_main(uint64_t below, const std::vector<std::string> &args_)
 {
-  // sweep_all [index=<N1>[,<N2>,...]] [<ring_size>] <address> [<payment_id>]
+  auto print_usage = [below]()
+  {
+    fail_msg_writer() << boost::format(tr("usage: %s [index=<N1>[,<N2>,...]] [<priority>] [<ring_size>] <address> [<payment_id>]")) % (below ? "sweep_below" : "sweep_all");
+  };
   if (args_.size() == 0)
   {
     fail_msg_writer() << tr("No address given");
+    print_usage();
     return true;
   }
 
@@ -4986,7 +5000,10 @@ bool simple_wallet::sweep_main(uint64_t below, const std::vector<std::string> &a
   if (local_args.size() > 0 && local_args[0].substr(0, 6) == "index=")
   {
     if (!parse_subaddress_indices(local_args[0], subaddr_indices))
+    {
+      print_usage();
       return true;
+    }
     local_args.erase(local_args.begin());
   }
 
@@ -5054,6 +5071,7 @@ bool simple_wallet::sweep_main(uint64_t below, const std::vector<std::string> &a
     if(!r && local_args.size() == 3)
     {
       fail_msg_writer() << tr("payment id has invalid format, expected 16 or 64 character hex string: ") << payment_id_str;
+      print_usage();
       return true;
     }
     if (payment_id_seen)
@@ -5064,6 +5082,7 @@ bool simple_wallet::sweep_main(uint64_t below, const std::vector<std::string> &a
   if (!cryptonote::get_account_address_from_str_or_url(info, m_wallet->nettype(), local_args[0], oa_prompter))
   {
     fail_msg_writer() << tr("failed to parse address");
+    print_usage();
     return true;
   }
 
